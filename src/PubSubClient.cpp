@@ -196,7 +196,7 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
         if (result == 1) {
             nextMsgId = 1;
             // Leave room in the buffer for header and variable length field
-            uint16_t length = MQTT_MAX_HEADER_SIZE;
+            uint32_t length = 5;
             unsigned int j;
 
 #if MQTT_VERSION == MQTT_VERSION_3_1
@@ -262,23 +262,28 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
                     return false;
                 }
             }
-            uint8_t llen;
-            uint32_t len = readPacket(&llen);
-
-            if (len == 4) {
-                if (buffer[3] == 0) {
+            uint8_t type;
+            readPacketHeader(&type, &length);
+            if (MQTTTYPE(type) == MQTTCONNACK && length == 2) {
+                uint8_t connState;
+                
+                if(!readByte(&connState)) return false; // the first byte is a flag field, just skip it
+                if(!readByte(&connState)) return false;
+                
+                if (connState == 0) {
                     lastInActivity = millis();
                     pingOutstanding = false;
                     _state = MQTT_CONNECTED;
                     return true;
                 } else {
-                    _state = buffer[3];
+                    _state = connState;
+                    _client->stop();
+                    return false;
                 }
             }
             _client->stop();
-        } else {
-            _state = MQTT_CONNECT_FAILED;
         }
+        _state = MQTT_CONNECT_FAILED;
         return false;
     }
     return true;
@@ -309,62 +314,115 @@ boolean PubSubClient::readByte(uint8_t * result, uint16_t * index){
   return false;
 }
 
-uint32_t PubSubClient::readPacket(uint8_t* lengthLength) {
-    uint16_t len = 0;
-    if(!readByte(this->buffer, &len)) return 0;
-    bool isPublish = (this->buffer[0]&0xF0) == MQTTPUBLISH;
-    uint32_t multiplier = 1;
-    uint32_t length = 0;
-    uint8_t digit = 0;
-    uint16_t skip = 0;
-    uint32_t start = 0;
-
+boolean PubSubClient::readPacketHeader(uint8_t* type, uint32_t* length) {
+    uint8_t lengthPos = 0;
+    uint8_t digit;
+    
+    if(!readByte(type)) return false;
+    
+    *length = 0;
     do {
-        if (len == 5) {
-            // Invalid remaining length encoding - kill the connection
-            _state = MQTT_DISCONNECTED;
-            _client->stop();
-            return 0;
-        }
-        if(!readByte(&digit)) return 0;
-        this->buffer[len++] = digit;
-        length += (digit & 127) * multiplier;
-        multiplier <<=7; //multiplier *= 128
+        if(!readByte(&digit)) return false;
+        *length += (digit & 127) << (7*lengthPos++);
     } while ((digit & 128) != 0);
-    *lengthLength = len-1;
+    
+    return true;
+}
 
-    if (isPublish) {
-        // Read in topic length to calculate bytes to skip over for Stream writing
-        if(!readByte(this->buffer, &len)) return 0;
-        if(!readByte(this->buffer, &len)) return 0;
-        skip = (this->buffer[*lengthLength+1]<<8)+this->buffer[*lengthLength+2];
-        start = 2;
-        if (this->buffer[0]&MQTTQOS1) {
-            // skip message id
-            skip += 2;
+boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
+    uint16_t topicLength;
+    uint8_t digit;
+    uint16_t msgId;
+    
+    if(remaining < 2) return false;
+    
+    if(!readByte(&digit)) return false;
+    topicLength = digit << 8;
+    if(!readByte(&digit)) return false;
+    topicLength += digit;
+    
+    remaining -= 2;
+    if(topicLength > remaining) return false;
+    
+    if(topicLength > MQTT_MAX_PACKET_SIZE) { // ignore big packets
+        if(MQTTQOS(type) != MQTTQOS0) { // we have to read the msgId
+            skipData(topicLength);
+            
+            if(remaining < 2) return false;
+    
+            if(!readByte(&digit)) return false;
+            msgId = digit << 8;
+            if(!readByte(&digit)) return false;
+            msgId += digit;
+    
+            remaining -= 2;
+            
+            sendPubAck(msgId);
         }
+        skipData(remaining);
+        return true;
     }
-    uint32_t idx = len;
-
-    for (uint32_t i = start;i<length;i++) {
-        if(!readByte(&digit)) return 0;
-        if (this->stream) {
-            if (isPublish && idx-*lengthLength-2>skip) {
+    
+    char topic[topicLength + 1];
+    for(uint16_t i = 0; i < topicLength; i++) {
+        if(!readByte((uint8_t*)&topic[i])) return false;
+        remaining--;
+    }
+    topic[topicLength] = 0;
+    
+    if(MQTTQOS(type) != MQTTQOS0) {
+        if(remaining < 2) return false;
+    
+        if(!readByte(&digit)) return false;
+        msgId = digit << 8;
+        if(!readByte(&digit)) return false;
+        msgId += digit;
+    
+        remaining -= 2;
+    }
+    
+    
+    if(remaining > MQTT_MAX_PACKET_SIZE) { // read big packets only into the stream
+        if(this->stream) {
+            while(remaining-- != 0) {
+                if(!readByte(&digit)) return false;
                 this->stream->write(digit);
             }
+        } else {
+            skipData(remaining);
         }
-
-        if (len < this->bufferSize) {
-            this->buffer[len] = digit;
-            len++;
-        }
-        idx++;
+        if(MQTTQOS(type) != MQTTQOS0) sendPubAck(msgId);
+            
+        return true;
     }
-
-    if (!this->stream && idx > this->bufferSize) {
-        len = 0; // This will cause the packet to be ignored.
+    
+    uint16_t pos = 0;
+    while(remaining-- != 0) {
+        if(!readByte(buffer, &pos)) return false;
+        if(this->stream)
+            this->stream->write(buffer[pos -1]);
     }
-    return len;
+    
+    if(callback) callback(topic, buffer, pos);
+    
+    if(MQTTQOS(type) != MQTTQOS0) sendPubAck(msgId);
+    
+    return true;
+}
+boolean PubSubClient::sendPubAck(uint16_t msgId) {
+    buffer[0] = MQTTPUBACK;
+    buffer[1] = 2;
+    buffer[2] = (msgId >> 8);
+    buffer[3] = (msgId & 0xFF);
+    _client->write(buffer,4);
+}
+
+boolean PubSubClient::skipData(uint32_t remaining) {
+    uint8_t digit;
+    while(remaining-- != 0) {
+         if(!readByte(&digit)) return false;
+    }
+    return true;
 }
 
 boolean PubSubClient::loop() {
@@ -385,47 +443,34 @@ boolean PubSubClient::loop() {
             }
         }
         if (_client->available()) {
-            uint8_t llen;
-            uint16_t len = readPacket(&llen);
-            uint16_t msgId = 0;
-            uint8_t *payload;
-            if (len > 0) {
-                lastInActivity = t;
-                uint8_t type = this->buffer[0]&0xF0;
-                if (type == MQTTPUBLISH) {
-                    if (callback) {
-                        uint16_t tl = (this->buffer[llen+1]<<8)+this->buffer[llen+2]; /* topic length in bytes */
-                        memmove(this->buffer+llen+2,this->buffer+llen+3,tl); /* move topic inside buffer 1 byte to front */
-                        this->buffer[llen+2+tl] = 0; /* end the topic as a 'C' string with \x00 */
-                        char *topic = (char*) this->buffer+llen+2;
-                        // msgId only present for QOS>0
-                        if ((this->buffer[0]&0x06) == MQTTQOS1) {
-                            msgId = (this->buffer[llen+3+tl]<<8)+this->buffer[llen+3+tl+1];
-                            payload = this->buffer+llen+3+tl+2;
-                            callback(topic,payload,len-llen-3-tl-2);
-
-                            this->buffer[0] = MQTTPUBACK;
-                            this->buffer[1] = 2;
-                            this->buffer[2] = (msgId >> 8);
-                            this->buffer[3] = (msgId & 0xFF);
-                            _client->write(this->buffer,4);
-                            lastOutActivity = t;
-
-                        } else {
-                            payload = this->buffer+llen+3+tl;
-                            callback(topic,payload,len-llen-3-tl);
-                        }
-                    }
-                } else if (type == MQTTPINGREQ) {
-                    this->buffer[0] = MQTTPINGRESP;
-                    this->buffer[1] = 0;
-                    _client->write(this->buffer,2);
-                } else if (type == MQTTPINGRESP) {
-                    pingOutstanding = false;
-                }
-            } else if (!connected()) {
-                // readPacket has closed the connection
+            uint8_t type;
+            uint32_t length;
+            if(!readPacketHeader(&type, &length)) {
+                this->_state = MQTT_CONNECTION_LOST;
+                _client->stop();
                 return false;
+            }
+            lastInActivity = t;
+            
+            switch(MQTTTYPE(type)) {
+                case MQTTPUBLISH:
+                    handlePublishPacket(type, length);
+                    break;
+                case MQTTPINGRESP:
+                    pingOutstanding = false;
+                    if(length != 0) {
+                        this->_state = MQTT_CONNECTION_LOST;
+                        _client->stop();
+                        return false;
+                    }
+                    break;
+                case MQTTSUBACK: // we ignore this packet
+                    if(!skipData(length)) return false;
+                    break;
+                default:
+                    this->_state = MQTT_CONNECTION_LOST;
+                    _client->stop();
+                    return false;
             }
         }
         return true;
