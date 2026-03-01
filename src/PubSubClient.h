@@ -52,6 +52,7 @@
 #define MQTT_CONNECT_UNAVAILABLE     3
 #define MQTT_CONNECT_BAD_CREDENTIALS 4
 #define MQTT_CONNECT_UNAUTHORIZED    5
+#define MQTT_READ_TIMEOUT            6
 
 #define MQTTCONNECT     1 << 4  // Client request to connect to Server        C->S
 #define MQTTCONNACK     2 << 4  // Connect Acknowledgment                     S->C
@@ -113,6 +114,7 @@ private:
    boolean skipData(uint32_t remaining);
    boolean readByte(uint8_t * result);
    boolean readByte(uint8_t * result, uint16_t * index);
+   size_t readBytes(size_t length);
    boolean write(uint8_t header, uint8_t* buf, uint16_t length);
    uint16_t writeString(const char* string, uint8_t* buf, uint16_t pos);
    // Build up the header ready to send

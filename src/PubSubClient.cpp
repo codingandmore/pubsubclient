@@ -319,6 +319,7 @@ boolean PubSubClient::readByte(uint8_t * result) {
      yield();
      uint32_t currentMillis = millis();
      if(currentMillis - previousMillis >= ((int32_t) this->socketTimeout * 1000)){
+       _state = MQTT_READ_TIMEOUT;
        return false;
      }
    }
@@ -335,6 +336,20 @@ boolean PubSubClient::readByte(uint8_t * result, uint16_t * index){
     return true;
   }
   return false;
+}
+
+// reads a block of bytes into buffer
+size_t PubSubClient::readBytes(size_t length) {
+   uint32_t previousMillis = millis();
+   while(!_client->available()) {
+     yield();
+     uint32_t currentMillis = millis();
+     if(currentMillis - previousMillis >= ((int32_t) this->socketTimeout * 1000)){
+       _state = MQTT_READ_TIMEOUT;
+       return -1;  // abort with timeout
+     }
+   }
+   return _client->readBytes(this->buffer, length);
 }
 
 boolean PubSubClient::readPacketHeader(uint8_t* type, uint32_t* length) {
@@ -404,7 +419,7 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
         remaining -= 2;
     }
     
-    
+    uint16_t pos = 0; 
     if(remaining > MQTT_MAX_PACKET_SIZE) { // read big packets only into the stream
         if(this->stream) {            
             uint32_t bytesToReceive = remaining;
@@ -413,14 +428,20 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
               startStreamCallback(topic, msgId, remaining);
             }
 
-            while(remaining-- != 0) {
-                if(!readByte(&digit)) {
+            while(remaining > 0) {
+              size_t toRead = bufferSize;
+              if (remaining < bufferSize) {
+                toRead = remaining;
+              }
+              size_t bytesRead = readBytes(toRead);
+              if (bytesRead < 0) {
                   if(endStreamCallback) {
                     endStreamCallback(topic, msgId, bytesToReceive-remaining);
                   }
                   return false;
                 }
-                this->stream->write(digit);                
+                this->stream->write(buffer, bytesRead);
+                remaining -= bytesRead;               
             }
             if(endStreamCallback) {
               endStreamCallback(topic, msgId, bytesToReceive);
@@ -435,18 +456,23 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
         return true;
     }
     
-    uint16_t pos = 0;
+    pos = 0;
     uint32_t bytesToReceive = remaining;
 
     if (this->stream && !useStreamingOnlyForLargePackets && startStreamCallback) {
       startStreamCallback(topic, msgId, remaining);
     }
 
-    while(remaining-- != 0) {
-        if(!readByte(buffer, &pos))
-          return false;
-        if(this->stream  && !useStreamingOnlyForLargePackets)
-            this->stream->write(buffer[pos-1]);
+    while(remaining > 0) {
+        size_t bytesRead = readBytes(remaining);
+        if (bytesRead < 0) {
+          break;
+        } 
+        if (this->stream  && !useStreamingOnlyForLargePackets) {
+            this->stream->write(buffer+pos, bytesRead);
+        }
+        remaining -= bytesRead;
+        pos += bytesRead;
     }
 
     if (this->stream && !useStreamingOnlyForLargePackets && endStreamCallback) {
@@ -461,6 +487,7 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
     
     return true;
 }
+
 boolean PubSubClient::sendPubAck(uint16_t msgId) {
     buffer[0] = MQTTPUBACK;
     buffer[1] = 2;
