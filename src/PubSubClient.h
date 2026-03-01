@@ -82,8 +82,12 @@
 #if defined(ESP8266) || defined(ESP32)
 #include <functional>
 #define MQTT_CALLBACK_SIGNATURE std::function<void(char*, uint8_t*, unsigned int)> callback
+#define MQTT_START_STREAM_CALLBACK_SIGNATURE std::function<void(const char*, uint16_t, unsigned int)> startStreamCallback
+#define MQTT_STOP_STREAM_CALLBACK_SIGNATURE std::function<void(const char*, uint16_t, unsigned int)> endStreamCallback
 #else
 #define MQTT_CALLBACK_SIGNATURE void (*callback)(char*, uint8_t*, unsigned int)
+#define MQTT_START_STREAM_CALLBACK_SIGNATURE void(*startStreamCallback)(const char*, uint16_t, unsigned int)
+#define MQTT_STOP_STREAM_CALLBACK_SIGNATURE void(*stopStreamCallback)(const char*, uint16_t, unsigned int)
 #endif
 
 #define CHECK_STRING_LENGTH(l,s) if (l+2+strnlen(s, this->bufferSize) > this->bufferSize) {_client->stop();return false;}
@@ -100,6 +104,9 @@ private:
    unsigned long lastInActivity;
    bool pingOutstanding;
    MQTT_CALLBACK_SIGNATURE;
+   MQTT_START_STREAM_CALLBACK_SIGNATURE;
+   MQTT_STOP_STREAM_CALLBACK_SIGNATURE;
+
    boolean readPacketHeader(uint8_t* type, uint32_t* length);
    boolean handlePublishPacket(uint8_t type, uint32_t remaining);
    boolean sendPubAck(uint16_t msgId);
@@ -118,6 +125,7 @@ private:
    uint16_t port;
    Stream* stream;
    int _state;
+   boolean useStreamingOnlyForLargePackets;
 public:
    PubSubClient();
    PubSubClient(Client& client);
@@ -140,10 +148,15 @@ public:
    PubSubClient& setServer(uint8_t * ip, uint16_t port);
    PubSubClient& setServer(const char * domain, uint16_t port);
    PubSubClient& setCallback(MQTT_CALLBACK_SIGNATURE);
+   PubSubClient& setStartStreamCallback(MQTT_START_STREAM_CALLBACK_SIGNATURE);
+   PubSubClient& setEndStreamCallback(MQTT_STOP_STREAM_CALLBACK_SIGNATURE);
    PubSubClient& setClient(Client& client);
    PubSubClient& setStream(Stream& stream);
    PubSubClient& setKeepAlive(uint16_t keepAlive);
    PubSubClient& setSocketTimeout(uint16_t timeout);
+     // if onlyLarge is true the stream will only be used for packets having larger length
+     // than MQTT_MAX_PACKET_SIZE, if false stream is used for each packet
+   PubSubClient& setUseStreamingOnlyForLargePackets(boolean onlyLarge);
 
    boolean setBufferSize(uint16_t size);
    uint16_t getBufferSize();
