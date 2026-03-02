@@ -83,15 +83,27 @@
 #if defined(ESP8266) || defined(ESP32)
 #include <functional>
 #define MQTT_CALLBACK_SIGNATURE std::function<void(char*, uint8_t*, unsigned int)> callback
-#define MQTT_START_STREAM_CALLBACK_SIGNATURE std::function<void(const char*, uint16_t, unsigned int)> startStreamCallback
-#define MQTT_STOP_STREAM_CALLBACK_SIGNATURE std::function<void(const char*, uint16_t, unsigned int)> endStreamCallback
 #else
 #define MQTT_CALLBACK_SIGNATURE void (*callback)(char*, uint8_t*, unsigned int)
-#define MQTT_START_STREAM_CALLBACK_SIGNATURE void(*startStreamCallback)(const char*, uint16_t, unsigned int)
-#define MQTT_STOP_STREAM_CALLBACK_SIGNATURE void(*stopStreamCallback)(const char*, uint16_t, unsigned int)
 #endif
 
 #define CHECK_STRING_LENGTH(l,s) if (l+2+strnlen(s, this->bufferSize) > this->bufferSize) {_client->stop();return false;}
+
+class PubSubWriter {
+  public:
+  // Interface for receiving payload for subscribed messages. If the message payload
+  // fits into the buffer there is a single call to the packetReceived function containing
+  // the payload. If the payload is larger than the buffer size streaming is used. Then at 
+  // first startStream is called indicating the expected length. Then multiple call to 
+  // write are performed to flush the received buffer. At last endStream will be called
+  // to indicate that the transfer is complete. If the length passed in endStream is 
+  // smaller than the length in startStream an error occured and transfer of the payload
+  // was aborted.
+  virtual size_t write(const uint8_t *buffer, size_t size) = 0;
+  virtual void startStream(const char* topic, uint16_t msgId, uint32_t length) = 0;
+  virtual void endStream(const char* topic, uint16_t msgId, uint32_t length) = 0;
+  virtual void packetReceived(const char* topic, uint16_t msgId, const uint8_t *payload, uint32_t length) = 0;
+};
 
 class PubSubClient : public Print {
 private:
@@ -104,9 +116,7 @@ private:
    unsigned long lastOutActivity;
    unsigned long lastInActivity;
    bool pingOutstanding;
-   MQTT_CALLBACK_SIGNATURE;
-   MQTT_START_STREAM_CALLBACK_SIGNATURE;
-   MQTT_STOP_STREAM_CALLBACK_SIGNATURE;
+   MQTT_CALLBACK_SIGNATURE; // kept for compatibility
 
    boolean readPacketHeader(uint8_t* type, uint32_t* length);
    boolean handlePublishPacket(uint8_t type, uint32_t remaining);
@@ -125,24 +135,24 @@ private:
    IPAddress ip;
    const char* domain;
    uint16_t port;
-   Stream* stream;
+   PubSubWriter* writer;
    int _state;
    boolean useStreamingOnlyForLargePackets;
 public:
    PubSubClient();
    PubSubClient(Client& client);
    PubSubClient(IPAddress, uint16_t, Client& client);
-   PubSubClient(IPAddress, uint16_t, Client& client, Stream&);
+   PubSubClient(IPAddress, uint16_t, Client& client, PubSubWriter&);
    PubSubClient(IPAddress, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client);
-   PubSubClient(IPAddress, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client, Stream&);
+   PubSubClient(IPAddress, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client, PubSubWriter&);
    PubSubClient(uint8_t *, uint16_t, Client& client);
-   PubSubClient(uint8_t *, uint16_t, Client& client, Stream&);
+   PubSubClient(uint8_t *, uint16_t, Client& client, PubSubWriter&);
    PubSubClient(uint8_t *, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client);
-   PubSubClient(uint8_t *, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client, Stream&);
+   PubSubClient(uint8_t *, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client, PubSubWriter&);
    PubSubClient(const char*, uint16_t, Client& client);
-   PubSubClient(const char*, uint16_t, Client& client, Stream&);
+   PubSubClient(const char*, uint16_t, Client& client, PubSubWriter&);
    PubSubClient(const char*, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client);
-   PubSubClient(const char*, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client, Stream&);
+   PubSubClient(const char*, uint16_t, MQTT_CALLBACK_SIGNATURE,Client& client, PubSubWriter&);
 
    ~PubSubClient();
 
@@ -150,15 +160,11 @@ public:
    PubSubClient& setServer(uint8_t * ip, uint16_t port);
    PubSubClient& setServer(const char * domain, uint16_t port);
    PubSubClient& setCallback(MQTT_CALLBACK_SIGNATURE);
-   PubSubClient& setStartStreamCallback(MQTT_START_STREAM_CALLBACK_SIGNATURE);
-   PubSubClient& setEndStreamCallback(MQTT_STOP_STREAM_CALLBACK_SIGNATURE);
+
    PubSubClient& setClient(Client& client);
-   PubSubClient& setStream(Stream& stream);
+   PubSubClient& setWriter(PubSubWriter& writer);
    PubSubClient& setKeepAlive(uint16_t keepAlive);
    PubSubClient& setSocketTimeout(uint16_t timeout);
-     // if onlyLarge is true the stream will only be used for packets having larger length
-     // than MQTT_MAX_PACKET_SIZE, if false stream is used for each packet
-   PubSubClient& setUseStreamingOnlyForLargePackets(boolean onlyLarge);
 
    boolean setBufferSize(uint16_t size);
    uint16_t getBufferSize();
@@ -198,7 +204,6 @@ public:
    boolean loop();
    boolean connected();
    int state();
-
 };
 
 
