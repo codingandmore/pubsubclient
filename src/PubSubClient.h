@@ -141,7 +141,6 @@ private:
   uint16_t port;
   PubSubWriter* writer;
   int _state;
-  boolean useStreamingOnlyForLargePackets;
 
 public:
   PubSubClient();

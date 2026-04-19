@@ -375,7 +375,7 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
   if (topicLength > remaining)
     return false;
 
-  if (topicLength > MQTT_MAX_PACKET_SIZE) { // ignore big packets
+  if (topicLength > this->bufferSize) { // ignore big packets
     if (MQTTQOS(type) != MQTTQOS0) {        // we have to read the msgId
       skipData(topicLength);
 
@@ -418,9 +418,8 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
 
     remaining -= 2;
   }
-
   uint16_t pos = 0;
-  if (remaining > MQTT_MAX_PACKET_SIZE) { // read big packets only into the stream
+  if (remaining > this->bufferSize) { // read big packets only into the stream
     if (this->writer) {
       uint32_t bytesToReceive = remaining;
 
@@ -458,19 +457,17 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
 
   pos = 0;
   uint32_t bytesToReceive = remaining;
-
   while (remaining > 0) {
     size_t bytesRead = readBytes(remaining);
     if (bytesRead < 0) {
       break;
     }
-    if (this->writer && !useStreamingOnlyForLargePackets) {
-      this->writer->packetReceived(topic, msgId, buffer + pos, bytesRead);
-    }
     remaining -= bytesRead;
     pos += bytesRead;
   }
-
+  if (this->writer) {
+    this->writer->packetReceived(topic, msgId, buffer, pos);
+  }
   if (callback) // only for backwards compatibility
     callback(topic, buffer, pos);
 
