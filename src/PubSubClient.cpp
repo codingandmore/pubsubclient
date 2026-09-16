@@ -333,10 +333,14 @@ size_t PubSubClient::readBytes(size_t length) {
     uint32_t currentMillis = millis();
     if (currentMillis - previousMillis >= ((int32_t)this->socketTimeout * 1000)) {
       _state = MQTT_READ_TIMEOUT;
-      return -1; // abort with timeout
+      return 0; // abort with timeout
     }
   }
-  return _client->readBytes(this->buffer, length);
+  size_t bytesRead = _client->readBytes(this->buffer, length);
+  if (bytesRead == 0) {
+    _state = MQTT_READ_TIMEOUT;
+  }
+  return bytesRead;
 }
 
 boolean PubSubClient::readPacketHeader(uint8_t* type, uint32_t* length) {
@@ -433,7 +437,7 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
           toRead = remaining;
         }
         size_t bytesRead = readBytes(toRead);
-        if (bytesRead < 0) {
+        if (bytesRead == 0) {
           if (writer) {
             writer->endStream(topic, msgId, bytesToReceive - remaining);
           }
@@ -445,7 +449,6 @@ boolean PubSubClient::handlePublishPacket(uint8_t type, uint32_t remaining) {
       if (writer) {
         writer->endStream(topic, msgId, bytesToReceive);
       }
-
     } else {
       skipData(remaining);
     }
@@ -523,8 +526,9 @@ boolean PubSubClient::loop() {
 
       switch (MQTTTYPE(type)) {
       case MQTTPUBLISH:
-        handlePublishPacket(type, length);
-        break;
+        if (!handlePublishPacket(type, length)) {
+          return false;
+        }
       case MQTTPINGRESP:
         pingOutstanding = false;
         if (length != 0) {
